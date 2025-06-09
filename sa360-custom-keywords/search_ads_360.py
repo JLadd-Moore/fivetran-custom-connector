@@ -216,6 +216,8 @@ def generate_custom_column_rows(config, session, customer_id, custom_columns, da
         for record in results:
             campaign_id = record["campaign"]["id"]
             campaign_name = record["campaign"]["name"]
+            adgroup_id = record["adGroup"]["id"]
+            adgroup_name = record["adGroup"]["name"]
             clicks = record.get("metrics", {}).get("clicks", "0")
             impressions = record.get("metrics", {}).get("impressions", "0")
             cost = record.get("metrics", {}).get("costMicros", "0")
@@ -235,6 +237,8 @@ def generate_custom_column_rows(config, session, customer_id, custom_columns, da
                     "value": val,
                     "date": date,
                     "campaign_id": campaign_id,
+                    "adgroup_id" :adgroup_id,
+                    "adgroup_name" : adgroup_name,
                     "customer_id": customer_id,
                     "keyword_text": kw_text,
                     "keyword_match_type": kw_match_type,
