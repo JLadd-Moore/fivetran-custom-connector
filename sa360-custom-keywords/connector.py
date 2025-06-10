@@ -20,6 +20,8 @@ def schema(configuration: dict):
                 "column_id",
                 "customer_id",
                 "campaign_id",
+                "adgroup_id",
+                "adgroup_name",
                 "date",
                 "keyword_text",
                 "keyword_match_type",
@@ -29,6 +31,8 @@ def schema(configuration: dict):
                 "column_id": "STRING",
                 "campaign_id": "STRING",
                 "customer_id": "STRING",
+                "adgroup_id": "STRING",
+                "adgroup_name": "STRING",
                 "value": "STRING",
                 "keyword_text": "STRING",
                 "keyword_match_type": "STRING",
@@ -118,7 +122,6 @@ def update(configuration: dict, state: dict):
                                 "column_data_cursor": item["date"],
                             }
                         )
-
                     yield op.upsert(table="custom_column_metrics", data=item)
 
     yield op.checkpoint(
