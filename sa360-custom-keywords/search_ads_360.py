@@ -163,7 +163,7 @@ def get_custom_column_data(config, session, customer_id, custom_columns, date_cu
     # Base payload for the query with pageSize set to 5000
     payload = {
         "query": (
-            f"SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, "
+            f"SELECT campaign.id, campaign.name, ad_group.id, ad_group.name, ad_group_criterion.criterion_id, "
             f"ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, "
             f"metrics.clicks, metrics.impressions, metrics.cost_micros, "
             f"customer.currency_code, customer.descriptive_name, segments.date, {custom_columns} "
@@ -221,6 +221,7 @@ def generate_custom_column_rows(config, session, customer_id, custom_columns, da
             clicks = record.get("metrics", {}).get("clicks", "0")
             impressions = record.get("metrics", {}).get("impressions", "0")
             cost = record.get("metrics", {}).get("costMicros", "0")
+            adgroup_criterion_id = record.get("adGroupCriterion", {}).get("criterionId", "0")
             kw_text = record.get("adGroupCriterion", {}).get("keyword", {}).get("text", "")
             kw_match_type = record.get("adGroupCriterion", {}).get("keyword", {}).get("matchType", "")
             account_name = record["customer"]["descriptiveName"]
@@ -240,6 +241,7 @@ def generate_custom_column_rows(config, session, customer_id, custom_columns, da
                     "adgroup_id" :adgroup_id,
                     "adgroup_name" : adgroup_name,
                     "customer_id": customer_id,
+                    "adgroup_criterion_id": adgroup_criterion_id,
                     "keyword_text": kw_text,
                     "keyword_match_type": kw_match_type,
                     "campaign_name": campaign_name,
