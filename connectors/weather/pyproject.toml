@@ -1,0 +1,20 @@
+[project]
+name = "weather-connector"
+version = "0.1.0"
+description = "Template weather api connector showing off ApiClient"
+authors = [
+    {name = "Your Name",email = "you@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "shared @ file:///C:/Users/jladd/Projects/fivetran/root-connectors/lib/shared"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.dependencies]
+shared = {develop = true}
