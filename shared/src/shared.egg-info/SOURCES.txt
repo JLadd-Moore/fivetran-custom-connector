@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+src/shared/__init__.py
+src/shared.egg-info/PKG-INFO
+src/shared.egg-info/SOURCES.txt
+src/shared.egg-info/dependency_links.txt
+src/shared.egg-info/requires.txt
+src/shared.egg-info/top_level.txt
+src/shared/api/__init__.py
+src/shared/api/auth_strategy.py
+src/shared/api/client.py
+src/shared/api/codecs.py
+src/shared/api/endpoint.py
+src/shared/api/xml_utils.py

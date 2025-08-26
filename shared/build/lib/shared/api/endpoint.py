@@ -5,6 +5,7 @@ from typing import Any, Callable, Iterable, Literal, Mapping, Optional, Sequence
 
 import requests
 from marshmallow import Schema
+from .codecs import PayloadCodec, JsonCodec
 
 
 HttpMethod = Literal["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
@@ -42,6 +43,13 @@ class Endpoint:
     get_next_page: Optional[GetNextPageFn] = None
     parse_download_url: Optional[ParseDownloadUrlFn] = None
     extract_items: Optional[ExtractItemsFn] = None
+    codec: PayloadCodec = JsonCodec()
+    # Optional newer pagination hook that can leverage parsed payloads
+    get_next_page_v2: Optional[
+        Callable[
+            [requests.Response, Any, Mapping[str, Any]], Optional[Mapping[str, Any]]
+        ]
+    ] = None
 
     def build_url(self, base_url: Optional[str]) -> str:
         if self.path.startswith("http://") or self.path.startswith("https://"):
@@ -87,6 +95,26 @@ def items_path_extractor(path: Union[str, Sequence[Union[str, int]]]) -> Extract
     return _extract
 
 
+def items_xpath_extractor(
+    xpath: str, namespaces: Optional[Mapping[str, str]] = None
+) -> ExtractItemsFn:
+    """Extractor for XML payloads parsed by SoapCodec using XPath.
+
+    Returns list of matching nodes or values, depending on XPath expression.
+    """
+
+    def _extract(payload: Any):
+        root = payload
+        # Expect lxml element. If not available, try best-effort .findall
+        try:
+            results = root.xpath(xpath, namespaces=namespaces or {})  # type: ignore[attr-defined]
+            return results
+        except Exception:
+            return []
+
+    return _extract
+
+
 __all__ = [
     "Endpoint",
     "HttpMethod",
@@ -94,4 +122,5 @@ __all__ = [
     "ParseDownloadUrlFn",
     "ExtractItemsFn",
     "items_path_extractor",
+    "items_xpath_extractor",
 ]

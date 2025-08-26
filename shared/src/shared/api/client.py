@@ -8,6 +8,7 @@ from fivetran_connector_sdk import (
 )
 
 from .endpoint import Endpoint
+from .codecs import JsonCodec, PayloadCodec, RequestParts
 from .auth_strategy import AuthStrategy
 
 
@@ -116,13 +117,23 @@ class _EndpointHandle:
         url = self._endpoint.build_url(self._base_url)
 
         while True:
-            # log.info(f"Requesting {url} with params {dumped_fields}")
+            # Use codec to translate fields to HTTP parts
+            codec: PayloadCodec = getattr(self._endpoint, "codec", JsonCodec())
+            parts: RequestParts = codec.dump(self._endpoint, dumped_fields or {})
+
+            merged_headers: Dict[str, str] = {}
+            if extra_headers:
+                merged_headers.update(dict(extra_headers))
+            if parts.headers:
+                merged_headers.update(dict(parts.headers))
+
             response = self._session.request(
                 method=self._endpoint.method,
                 url=url,
-                params=dumped_fields if self._endpoint.method == "GET" else None,
-                json=dumped_fields if self._endpoint.method != "GET" else None,
-                headers=extra_headers or None,
+                params=parts.params,
+                json=parts.json,
+                data=parts.data,
+                headers=merged_headers or None,
                 timeout=timeout,
             )
             response.raise_for_status()
@@ -141,7 +152,7 @@ class _EndpointHandle:
                 else:
                     page_payload = download_response.content
             else:
-                page_payload = response.json()
+                page_payload = codec.load(response)
 
             if isinstance(page_payload, (dict, list)):
                 page_data = self._endpoint.response_schema.load(page_payload)
@@ -167,7 +178,12 @@ class _EndpointHandle:
 
             if self._endpoint.get_next_page is None:
                 break
-            next_params = self._endpoint.get_next_page(response, effective_params)
+            if getattr(self._endpoint, "get_next_page_v2", None):
+                next_params = self._endpoint.get_next_page_v2(  # type: ignore[attr-defined]
+                    response, page_payload, effective_params
+                )
+            else:
+                next_params = self._endpoint.get_next_page(response, effective_params)
             if not next_params:
                 break
 
