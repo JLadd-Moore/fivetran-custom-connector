@@ -114,7 +114,12 @@ class _EndpointHandle:
         if request_fields is not None:
             dumped_fields = self._endpoint.request_schema.dump(request_fields)
 
-        url = self._endpoint.build_url(self._base_url)
+        # Build URL, allowing optional dynamic path_builder
+        url = (
+            self._endpoint.path_builder(self._base_url, dumped_fields or {})
+            if getattr(self._endpoint, "path_builder", None)
+            else self._endpoint.build_url(self._base_url)
+        )
 
         while True:
             # Use codec to translate fields to HTTP parts
@@ -167,14 +172,19 @@ class _EndpointHandle:
                     items_iter = page_data
                 elif isinstance(page_data, dict) and "results" in page_data:
                     items_iter = page_data["results"]
+                elif isinstance(page_data, dict) and "results_iter" in page_data:
+                    items_iter = page_data["results_iter"]
                 else:
                     items_iter = [page_data]
 
-            # Ensure we yield a concrete list for predictable iteration
-            items_list = (
-                list(items_iter) if not isinstance(items_iter, list) else items_iter
-            )
-            yield items_list
+            if getattr(self._endpoint, "materialize_pages", True):
+                items_list = (
+                    list(items_iter) if not isinstance(items_iter, list) else items_iter
+                )
+                yield items_list
+            else:
+                # Stream items without buffering full page
+                yield items_iter
 
             if self._endpoint.get_next_page is None:
                 break

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Optional, Dict
+from typing import Any, Callable, Mapping, Optional, Dict, List
 
 import requests
 
@@ -105,9 +105,46 @@ class SoapCodec(PayloadCodec):
         return root
 
 
+class CsvCodec(PayloadCodec):
+    """CSV codec with optional streaming.
+
+    If stream=True, returns an iterator of row dicts under key "results_iter";
+    otherwise, returns {"results": [row, ...]}.
+    """
+
+    def __init__(self, *, delimiter: Optional[str] = None, stream: bool = True) -> None:
+        self._delimiter = delimiter
+        self._stream = stream
+
+    def dump(self, endpoint: Any, request_fields: Mapping[str, Any]) -> RequestParts:
+        return RequestParts(headers=None)
+
+    def load(self, response: requests.Response) -> Any:
+        import csv
+        import io
+
+        response.raise_for_status()
+        text = response.text or ""
+        if not text:
+            return {"results": []} if not self._stream else {"results_iter": iter(())}
+
+        # Determine delimiter from first line if not set
+        first_newline = text.find("\n")
+        first_line = text[: first_newline if first_newline != -1 else len(text)]
+        delimiter = self._delimiter or ("\t" if "\t" in first_line else ",")
+
+        buf = io.StringIO(text)
+        reader = csv.DictReader(buf, delimiter=delimiter)
+        if self._stream:
+            return {"results_iter": reader}
+        else:
+            return {"results": list(reader)}
+
+
 __all__ = [
     "PayloadCodec",
     "JsonCodec",
     "SoapCodec",
+    "CsvCodec",
     "RequestParts",
 ]

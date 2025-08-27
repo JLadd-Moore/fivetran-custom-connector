@@ -32,6 +32,7 @@ class Endpoint:
     - parse_download_url: callable to extract a download URL from the initial response
     - extract_items: callable that takes the validated response payload and returns
       an iterable of unit objects that constitute a page
+    - path_builder: optional callable to build a URL from base_url and request fields
     """
 
     name: str
@@ -50,6 +51,33 @@ class Endpoint:
             [requests.Response, Any, Mapping[str, Any]], Optional[Mapping[str, Any]]
         ]
     ] = None
+    # Optional builder to compute URL dynamically from params
+    path_builder: Optional[Callable[[Optional[str], Mapping[str, Any]], str]] = None
+    # Control whether pages are materialized into lists (default True). Set False for streaming.
+    materialize_pages: bool = True
+
+    def single(self, params: Optional[Mapping[str, Any]] = None) -> Any:
+        """Convenience for endpoints that return a single object.
+
+        Returns the loaded response payload (after response_schema.load).
+        """
+        from .client import ApiClient  # local import to avoid cycles
+
+        class _SingleWrapper:
+            def __init__(self, handle: Any) -> None:
+                self._handle = handle
+
+            def get(self, params: Optional[Mapping[str, Any]] = None) -> Any:
+                pages = self._handle.pages(params)
+                for items in pages:
+                    # If items is a list and has exactly one element, return it;
+                    # otherwise return items as-is (caller decides how to handle).
+                    if isinstance(items, list) and len(items) == 1:
+                        return items[0]
+                    return items
+
+        # Construct a lightweight handle via ApiClient.endpoint path:
+        raise NotImplementedError("Call via ApiClient.endpoint(name).get(...) instead")
 
     def build_url(self, base_url: Optional[str]) -> str:
         if self.path.startswith("http://") or self.path.startswith("https://"):

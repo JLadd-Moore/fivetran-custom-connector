@@ -62,6 +62,29 @@ class BearerAuth(AuthStrategy):
         session.headers.update({"Authorization": f"Bearer {token}"})
 
 
+class BasicAuth(AuthStrategy):
+    """HTTP Basic authentication strategy.
+
+    Sets session.auth = (username, password) and allows adding static headers.
+    """
+
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        *,
+        extra_headers: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self._username = username
+        self._password = password
+        self._extra_headers = dict(extra_headers) if extra_headers else {}
+
+    def apply(self, session: requests.Session) -> None:
+        session.auth = (self._username, self._password)
+        if self._extra_headers:
+            session.headers.update(self._extra_headers)
+
+
 class OAuth2RefreshTokenAuth(AuthStrategy):
     """OAuth2 refresh-token grant bearer authentication strategy.
 

@@ -1,27 +1,15 @@
-# This is a simple example for how to work with the fivetran_connector_sdk module.
-# It shows the use of a requirements.txt file and a connector that calls a publicly available API to get the weather forecast data for Myrtle Beach in South Carolina, USA.
-# It also shows how to use the logging functionality provided by fivetran_connector_sdk, by logging important steps using log.info() and log.fine()
-# See the Technical Reference documentation (https://fivetran.com/docs/connectors/connector-sdk/technical-reference#update)
-# and the Best Practices documentation (https://fivetran.com/docs/connectors/connector-sdk/best-practices) for details.
-
 from datetime import datetime
 
 import requests as rq
+from marshmallow import Schema, fields, INCLUDE
 
-from fivetran_connector_sdk import (
-    Connector,
-)
-from fivetran_connector_sdk import (
-    Logging as log,
-)
-from fivetran_connector_sdk import (
-    Operations as op,
-)
+from fivetran_connector_sdk import Connector
+from fivetran_connector_sdk import Logging as log
+from fivetran_connector_sdk import Operations as op
 
 from shared.api.client import ApiClient
 from shared.api.auth_strategy import NoAuth
 from shared.api.endpoint import Endpoint, items_path_extractor
-from marshmallow import Schema, fields, INCLUDE
 
 
 class EmptyRequestSchema(Schema):
@@ -30,14 +18,12 @@ class EmptyRequestSchema(Schema):
 
 
 class ForecastResponseSchema(Schema):
-    # Only include the minimal fields we care about for the example
     properties = fields.Dict(required=True)
 
     class Meta:
         unknown = INCLUDE
 
 
-# the actual object we want to extract
 class PeriodSchema(Schema):
     number = fields.Integer(required=True)
     name = fields.String(required=True)
@@ -72,8 +58,6 @@ def schema(configuration: dict):
 def update(configuration: dict, state: dict):
     log.warning("Example: QuickStart Examples - Weather")
 
-    # Retrieve the cursor from the state to determine the current position in the data sync.
-    # If the cursor is not present in the state, start from the beginning of time ('0001-01-01T00:00:00Z').
     cursor = state["startTime"] if "startTime" in state else "0001-01-01T00:00:00Z"
 
     forecast_endpoint = endpoint = Endpoint(

@@ -2,7 +2,11 @@ import requests as rq
 import time
 from typing import Generator, Dict, List, Any
 from fivetran_connector_sdk import Logging as log
+from shared.logging import get_logger
 from state_codes import US_STATE_CODES
+
+
+LOG = get_logger("everyaction", "everyaction_api")
 
 
 def make_everyaction_request(
@@ -26,7 +30,7 @@ def make_everyaction_request(
         if response.status_code == 429 and rate_limit_retries > 0:
             attempt = 6 - rate_limit_retries
             delay = backoff_factor ** (attempt - 1)
-            log.info(f"Rate limited, waiting {delay} seconds before retry")
+            LOG.info("rate_limited", attempt=attempt, delay_seconds=delay)
             time.sleep(delay)
             rate_limit_retries -= 1
             continue
@@ -34,9 +38,7 @@ def make_everyaction_request(
         try:
             response.raise_for_status()
         except rq.exceptions.HTTPError as e:
-            log.info(f"Request failed: {e}")
-            log.info(f"URL: {url}")
-            log.info(f"Response: {response.text}")
+            LOG.error("http_error", status=response.status_code, url=url, error=str(e))
             raise
 
         return response
@@ -77,7 +79,7 @@ def get_paginated_data(
     page_count = 0
 
     while current_url:
-        log.info(f"Fetching page {page_count + 1}")
+        LOG.debug("page_fetch", page=page_count + 1)
 
         # For the first page, use the provided params
         # For subsequent pages, use the nextPageLink which already includes all parameters
@@ -102,29 +104,16 @@ def get_paginated_data(
 def get_paginated_data_manual_url(
     config: dict, session: rq.Session, url: str
 ) -> Generator[Dict[str, Any], None, None]:
-    """
-    Generic method to handle pagination for EveryAction API endpoints with manually built URLs.
-    Yields each page of results.
-
-    Args:
-        config: Configuration dictionary
-        session: Requests session with authentication
-        url: Full URL with parameters already included
-    """
+    """Deprecated: use ApiClient/Endpoint."""
     current_url = url
     page_count = 0
-
     while current_url:
-        log.info(f"Fetching page {page_count + 1}")
-
+        LOG.debug("page_fetch", page=page_count + 1)
         response = make_everyaction_request(
             config, method="GET", url=current_url, session=session
         )
-
         json_data = response.json()
         yield json_data
-
-        # Get next page URL if available
         current_url = json_data.get("nextPageLink")
         page_count += 1
 
@@ -132,106 +121,26 @@ def get_paginated_data_manual_url(
 def get_people_by_state(
     config: dict, session: rq.Session, state_code: str, batch_size: int = None
 ) -> Generator[Dict[str, Any], None, None]:
-    """
-    Gets people data for a specific state using the /people endpoint.
-
-    Args:
-        config: Configuration dictionary
-        session: Requests session with authentication
-        state_code: Two-letter state code (e.g., "TN")
-        batch_size: Optional batch size for pagination
-
-    Yields:
-        Dictionary containing people data for each page
-    """
+    """Deprecated: use ApiClient/Endpoint."""
     base_url = "https://api.securevan.com/v4/people"
-
-    # Build URL manually to avoid URL encoding of $ character
     url = f"{base_url}?stateOrProvince={state_code}"
     if batch_size:
         url += f"&$top={batch_size}"
-
-    for page_data in get_paginated_data_manual_url(config, session, url):
-        yield page_data
+    yield from get_paginated_data_manual_url(config, session, url)
 
 
 def get_contributions_by_van_id(
     config: dict, session: rq.Session, van_id: int, batch_size: int = None
 ) -> Generator[Dict[str, Any], None, None]:
-    """
-    Gets contributions data for a specific vanId using the /contributions/recentContributions endpoint.
-
-    Args:
-        config: Configuration dictionary
-        session: Requests session with authentication
-        van_id: The vanId to get contributions for
-        batch_size: Optional batch size for pagination
-
-    Yields:
-        Dictionary containing contributions data for each page
-    """
+    """Deprecated: use ApiClient/Endpoint."""
     base_url = f"https://api.securevan.com/v4/contributions/recentContributions"
     params = {"vanId": van_id}
-
     if batch_size:
         params["$top"] = batch_size
-
-    for page_data in get_paginated_data(config, session, base_url, params):
-        yield page_data
-
-
-def get_all_people_by_states(
-    config: dict,
-    session: rq.Session,
-    state_codes: List[str] = None,
-    batch_size: int = None,
-) -> Generator[Dict[str, Any], None, None]:
-    """
-    Gets people data for multiple states.
-
-    Args:
-        config: Configuration dictionary
-        session: Requests session with authentication
-        state_codes: List of state codes to query (defaults to all US states)
-        batch_size: Optional batch size for pagination
-
-    Yields:
-        Dictionary containing people data for each state/page
-    """
-    if state_codes is None:
-        state_codes = US_STATE_CODES
-
-    for state_code in state_codes:
-        log.info(f"Fetching people for state: {state_code}")
-        for page_data in get_people_by_state(config, session, state_code, batch_size):
-            # Add state_code to the response for tracking
-            page_data["state_code"] = state_code
-            yield page_data
-
-
-def get_all_contributions_for_people(
-    config: dict, session: rq.Session, van_ids: List[int], batch_size: int = None
-) -> Generator[Dict[str, Any], None, None]:
-    """
-    Gets contributions data for a list of vanIds.
-
-    Args:
-        config: Configuration dictionary
-        session: Requests session with authentication
-        van_ids: List of vanIds to get contributions for
-        batch_size: Optional batch size for pagination
-
-    Yields:
-        Dictionary containing contributions data for each vanId/page
-    """
-    for van_id in van_ids:
-        log.info(f"Fetching contributions for vanId: {van_id}")
-        for page_data in get_contributions_by_van_id(
-            config, session, van_id, batch_size
-        ):
-            # Add van_id to the response for tracking
-            page_data["van_id"] = van_id
-            yield page_data
+    current_url = base_url
+    if params:
+        current_url += "?" + "&".join([f"{k}={v}" for k, v in params.items()])
+    yield from get_paginated_data_manual_url(config, session, current_url)
 
 
 # Changed Entity Export API functions
@@ -334,14 +243,18 @@ def wait_for_export_job_completion(
         )
 
         if job_status.get("jobStatus") == "Complete":
-            log.info(f"Export job {export_job_id} completed successfully")
+            LOG.info("export_complete", export_job_id=export_job_id)
             return job_status
         elif job_status.get("jobStatus") in ["Failed", "Cancelled", "Error"]:
             raise Exception(
                 f"Export job {export_job_id} failed: {job_status.get('message')}"
             )
 
-        log.info(f"Export job {export_job_id} status: {job_status.get('jobStatus')}")
+        LOG.debug(
+            "export_status",
+            export_job_id=export_job_id,
+            status=job_status.get("jobStatus"),
+        )
         time.sleep(10)  # Wait 10 seconds before checking again
 
     raise TimeoutError(
@@ -370,7 +283,7 @@ def download_and_parse_export_files(
         if not download_url:
             continue
 
-        log.info(f"Downloading export file: {download_url}")
+        LOG.info("download_start", url=download_url)
 
         try:
             # Create a new session without authentication for SAS token URLs
@@ -384,11 +297,11 @@ def download_and_parse_export_files(
 
             # Log the first few lines of the downloaded content for debugging
             content_lines = response.text.split("\n")
-            log.info(f"Downloaded file has {len(content_lines)} lines")
+            LOG.debug("download_lines", count=len(content_lines))
             if content_lines:
-                log.info(f"First line: {content_lines[0][:200]}...")
+                LOG.debug("download_first_line", preview=content_lines[0][:200])
                 if len(content_lines) > 1:
-                    log.info(f"Second line: {content_lines[1][:200]}...")
+                    LOG.debug("download_second_line", preview=content_lines[1][:200])
 
             # Parse CSV content directly from response text (memory efficient)
             lines = response.text.splitlines()
@@ -401,31 +314,28 @@ def download_and_parse_export_files(
             first_line = lines[0]
             if "\t" in first_line:
                 delimiter = "\t"
-                log.info("Detected tab delimiter")
+                LOG.debug("delimiter_detected", delimiter="tab")
             else:
                 delimiter = ","
-                log.info("Detected comma delimiter")
+                LOG.debug("delimiter_detected", delimiter="comma")
 
             # Create CSV reader from lines (more memory efficient)
             csv_reader = csv.DictReader(lines, delimiter=delimiter)
 
             # Log the column headers for debugging
             if csv_reader.fieldnames:
-                log.info(f"CSV columns: {list(csv_reader.fieldnames)}")
+                LOG.debug("csv_columns", columns=list(csv_reader.fieldnames))
 
             # Yield rows one at a time (streaming)
             for row in csv_reader:
                 yield row
 
         except rq.exceptions.HTTPError as e:
-            log.warning(f"Failed to download file {download_url}: {e}")
-            log.warning(
-                "This might be due to authentication issues with the download URL"
-            )
+            LOG.warning("download_failed", url=download_url, error=str(e))
             # Continue with other files if available
             continue
         except Exception as e:
-            log.warning(f"Unexpected error downloading file {download_url}: {e}")
+            LOG.warning("download_unexpected_error", url=download_url, error=str(e))
             continue
 
 
@@ -459,8 +369,11 @@ def get_changed_entities_incremental(
     )
 
     export_job_id = job_metadata.get("exportJobId")
-    log.info(
-        f"Created export job {export_job_id} for {resource_type} changes since {last_sync_timestamp}"
+    LOG.info(
+        "export_created",
+        export_job_id=export_job_id,
+        resource_type=resource_type,
+        since=last_sync_timestamp,
     )
 
     # Wait for completion
@@ -472,4 +385,6 @@ def get_changed_entities_incremental(
         record_count += 1
         yield record
 
-    log.info(f"Processed {record_count} changed {resource_type} records")
+    LOG.info(
+        "export_records_processed", resource_type=resource_type, count=record_count
+    )
