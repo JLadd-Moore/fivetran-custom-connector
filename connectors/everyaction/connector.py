@@ -1,7 +1,32 @@
 from datetime import datetime
+import time
+from urllib.parse import urlparse, parse_qs
 from fivetran_connector_sdk import Connector
-from fivetran_connector_sdk import Logging as log
 from fivetran_connector_sdk import Operations as op
+
+from marshmallow import Schema, INCLUDE
+
+from shared.api.client import ApiClient
+from shared.api.endpoint import Endpoint
+from shared.api.codecs import CsvCodec
+from shared.api.auth_strategy import BasicAuth
+from shared.logging import get_logger
+
+
+class EmptySchema(Schema):
+    class Meta:
+        unknown = INCLUDE
+
+
+class IdentitySchema(Schema):
+    class Meta:
+        unknown = INCLUDE
+
+    def dump(self, obj, *, many=None):  # type: ignore[override]
+        return obj or {}
+
+
+LOG = get_logger("everyaction", "connector")
 
 
 # https://fivetran.com/docs/connectors/connector-sdk/technical-reference#schema
@@ -121,34 +146,123 @@ def update(configuration: dict, state: dict):
     Main update function that handles both initial sync and incremental sync.
 
     Initial sync: Fetches all people for all states, then their contributions
-    Incremental sync: Uses Changed Entity Export for efficient updates
+    Incremental sync: Uses Changed Entity Export for efficient updates (legacy path)
     """
-    from datetime import datetime
-    from everyaction_api import get_everyaction_session
-
-    # Create session with authentication
-    session = get_everyaction_session(configuration)
+    api = build_api_client(configuration)
 
     # Check if this is initial sync or incremental sync
     initial_sync_complete = state.get("initial_sync_complete", False)
 
     if not initial_sync_complete:
-        log.info("Starting initial sync - processing all states")
-        yield from perform_initial_sync(configuration, session, state)
+        LOG.info("sync_start", mode="initial")
+        yield from perform_initial_sync(configuration, api, state)
     else:
-        log.info("Performing incremental sync using Changed Entity Exports")
-        yield from perform_incremental_sync(configuration, session, state)
+        LOG.info("sync_start", mode="incremental")
+        yield from perform_incremental_sync(configuration, api, state)
 
 
-def perform_initial_sync(configuration: dict, session, state: dict):
+def _next_params_from_nextpagelink(_: object, page_payload: dict, __: dict):
+    """Parse EveryAction nextPageLink URL into replacement query params."""
+    if not isinstance(page_payload, dict):
+        return None
+    next_link = page_payload.get("nextPageLink")
+    if not next_link:
+        return None
+    parsed = urlparse(next_link)
+    qs = parse_qs(parsed.query)
+    flat = {k: (v[0] if isinstance(v, list) and v else v) for k, v in qs.items()}
+    return {"query": flat}
+
+
+def build_api_client(configuration: dict) -> ApiClient:
+    username = configuration["username"]
+    password = configuration["password"]
+    auth = BasicAuth(
+        username=username,
+        password=password,
+        extra_headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+
+    people_endpoint = Endpoint(
+        name="people",
+        path="https://api.securevan.com/v4/people",
+        method="GET",
+        request_schema=IdentitySchema(),
+        response_schema=EmptySchema(),
+        extract_items=lambda payload: (payload or {}).get("items", []),
+        get_next_page_v2=_next_params_from_nextpagelink,
+    )
+
+    contributions_endpoint = Endpoint(
+        name="recentContributions",
+        path="https://api.securevan.com/v4/contributions/recentContributions",
+        method="GET",
+        request_schema=IdentitySchema(),
+        response_schema=EmptySchema(),
+        extract_items=lambda payload: (payload or {}).get("items", []),
+        get_next_page_v2=_next_params_from_nextpagelink,
+    )
+
+    # Incremental export endpoints (create job, poll status, download csv)
+    create_export_endpoint = Endpoint(
+        name="createExportJob",
+        path="https://api.securevan.com/v4/changedEntityExportJobs",
+        method="POST",
+        request_schema=IdentitySchema(),
+        response_schema=EmptySchema(),
+    )
+
+    def _job_status_path_builder(_base: str | None, fields: dict) -> str:
+        export_job_id = fields.get("exportJobId") or fields.get("id")
+        return (
+            f"https://api.securevan.com:443/v4/changedEntityExportJobs/{export_job_id}"
+        )
+
+    job_status_endpoint = Endpoint(
+        name="jobStatus",
+        path="https://api.securevan.com:443/v4/changedEntityExportJobs",
+        method="GET",
+        request_schema=IdentitySchema(),
+        response_schema=EmptySchema(),
+        path_builder=_job_status_path_builder,
+    )
+
+    def _download_path_builder(_base: str | None, fields: dict) -> str:
+        return str(fields.get("url") or "")
+
+    download_csv_endpoint = Endpoint(
+        name="downloadCsv",
+        path="",
+        method="GET",
+        request_schema=IdentitySchema(),
+        response_schema=EmptySchema(),
+        codec=CsvCodec(stream=True),
+        path_builder=_download_path_builder,
+        materialize_pages=False,
+    )
+
+    return ApiClient(
+        auth_strategy=auth,
+        endpoints=[
+            people_endpoint,
+            contributions_endpoint,
+            create_export_endpoint,
+            job_status_endpoint,
+            download_csv_endpoint,
+        ],
+    )
+
+
+def perform_initial_sync(configuration: dict, api, state: dict):
     """
     Performs initial sync by iterating through all states and fetching all people/contributions.
     Uses state cursor to track progress across sync runs.
     Processes people and contributions page by page for memory efficiency.
     """
-    from everyaction_api import get_people_by_state, get_contributions_by_van_id
     from state_codes import US_STATE_CODES
-    from datetime import datetime
 
     # Get current state cursor or start from beginning
     current_state_index = state.get("state_cursor_index", 0)
@@ -156,22 +270,24 @@ def perform_initial_sync(configuration: dict, session, state: dict):
     # Process states starting from cursor position
     for i in range(current_state_index, len(US_STATE_CODES)):
         state_code = US_STATE_CODES[i]
-        log.info(f"Processing state {i+1}/{len(US_STATE_CODES)}: {state_code}")
+        LOG.info(
+            "state_start", index=i + 1, total=len(US_STATE_CODES), state=state_code
+        )
 
         # Process people page by page for memory efficiency
         page_count = 0
         total_people_count = 0
         total_contributions_count = 0
 
-        for page_data in get_people_by_state(
-            configuration, session, state_code, batch_size=200
+        for page_items in api.endpoint("people").pages(
+            {"stateOrProvince": state_code, "$top": 200}
         ):
             page_count += 1
-            log.info(f"Processing page {page_count} for state {state_code}")
+            LOG.info("page_start", state=state_code, page=page_count)
 
-            items = page_data.get("items", [])
+            items = list(page_items or [])
             if not items:
-                log.info(f"No items in page {page_count} for state {state_code}")
+                LOG.info("page_empty", state=state_code, page=page_count)
                 continue
 
             # Process people from this page
@@ -185,8 +301,11 @@ def perform_initial_sync(configuration: dict, session, state: dict):
                 if person.get("vanId"):
                     van_ids_in_page.append(person["vanId"])
 
-            log.info(
-                f"Retrieved {len(people_in_page)} people records from page {page_count} for state {state_code}"
+            LOG.info(
+                "people_fetched",
+                state=state_code,
+                page=page_count,
+                count=len(people_in_page),
             )
 
             # Upsert people data for this page
@@ -194,32 +313,40 @@ def perform_initial_sync(configuration: dict, session, state: dict):
                 for person in people_in_page:
                     yield op.upsert("people", person)
                 total_people_count += len(people_in_page)
-                log.info(
-                    f"Successfully upserted {len(people_in_page)} people records from page {page_count} of state {state_code}"
+                LOG.info(
+                    "people_upserted",
+                    state=state_code,
+                    page=page_count,
+                    count=len(people_in_page),
                 )
 
             # Get contributions for people in this page
             contributions_in_page = 0
             for van_id in van_ids_in_page:
-                for contribution_page_data in get_contributions_by_van_id(
-                    configuration, session, van_id, batch_size=200
+                for contribution_items in api.endpoint("recentContributions").pages(
+                    {"vanId": van_id, "$top": 200}
                 ):
-                    contribution_items = contribution_page_data.get("items", [])
-                    for contribution in contribution_items:
+                    for contribution in list(contribution_items or []):
                         contribution = transform_contribution_data(contribution, van_id)
                         yield op.upsert("contributions", contribution)
                         contributions_in_page += 1
 
             total_contributions_count += contributions_in_page
-            log.info(
-                f"Successfully upserted {contributions_in_page} contribution records from page {page_count} for state {state_code}"
+            LOG.info(
+                "contributions_upserted",
+                state=state_code,
+                page=page_count,
+                count=contributions_in_page,
             )
 
             # Debug: break after first page for testing
             # break
 
-        log.info(
-            f"Completed state {state_code}: {total_people_count} people, {total_contributions_count} contributions"
+        LOG.info(
+            "state_complete",
+            state=state_code,
+            people=total_people_count,
+            contributions=total_contributions_count,
         )
 
         # Checkpoint progress after each state
@@ -238,69 +365,79 @@ def perform_initial_sync(configuration: dict, session, state: dict):
             "state_cursor_index": None,  # Clear cursor
         }
     )
-    log.info("Initial sync completed successfully")
+    LOG.info("sync_complete", mode="initial")
 
 
-def perform_incremental_sync(configuration: dict, session, state: dict):
-    """
-    Performs incremental sync using Changed Entity Export jobs.
-    """
-    from everyaction_api import get_changed_entities_incremental
-    from datetime import datetime
-
+def perform_incremental_sync(configuration: dict, api, state: dict):
+    """Incremental sync using Changed Entity Export via ApiClient endpoints."""
     last_sync_timestamp = state.get("last_sync_timestamp")
     if not last_sync_timestamp:
-        log.info("No last sync timestamp found - falling back to initial sync")
-        return perform_initial_sync(configuration, session, {})
+        LOG.warning("incremental_missing_cursor")
+        return perform_initial_sync(configuration, api, {})
 
-    log.info(f"Fetching changes since {last_sync_timestamp}")
+    LOG.info("incremental_start", since=last_sync_timestamp)
 
-    try:
-        # Get changed contacts (people)
-        contacts_count = 0
-        try:
-            for contact_record in get_changed_entities_incremental(
-                configuration, session, "Contacts", last_sync_timestamp
-            ):
-                contact = transform_csv_contact_to_person(contact_record)
-                if contact:  # Skip records with errors
-                    yield op.upsert("people", contact)
-                    contacts_count += 1
+    def _poll_job(export_job_id: int) -> dict:
+        while True:
+            status = next(
+                api.endpoint("jobStatus").items({"exportJobId": export_job_id})
+            )
+            job_status = status.get("jobStatus")
+            if job_status == "Complete":
+                return status
+            if job_status in {"Failed", "Cancelled", "Error"}:
+                raise RuntimeError(f"Export job {export_job_id} failed: {status}")
+            LOG.debug("export_status", export_job_id=export_job_id, status=job_status)
+            time.sleep(10)
 
-            log.info(f"Processed {contacts_count} changed contact records")
-        except Exception as e:
-            log.warning(f"Failed to process contacts: {e}")
+    def _run_export(resource_type: str, row_mapper):
+        payload = {
+            "resourceType": resource_type,
+            "dateChangedFrom": last_sync_timestamp,
+            "includeInactive": False,
+            "fileSizeKbLimit": 40000,
+        }
+        job_meta = next(api.endpoint("createExportJob").items(payload))
+        export_job_id = job_meta.get("exportJobId")
+        LOG.info(
+            "export_created", export_job_id=export_job_id, resource_type=resource_type
+        )
+        completed = _poll_job(export_job_id)
+        files = completed.get("files", []) or []
+        processed = 0
+        for f in files:
+            url = f.get("downloadUrl")
+            if not url:
+                continue
+            for row in api.endpoint("downloadCsv").items({"url": url}):
+                mapped = row_mapper(row)
+                if not mapped:
+                    continue
+                yield mapped
+                processed += 1
+        LOG.info(
+            "export_records_processed", resource_type=resource_type, count=processed
+        )
+
+    # Contacts
             contacts_count = 0
+    for person in _run_export("Contacts", transform_csv_contact_to_person):
+        yield op.upsert("people", person)
+        contacts_count += 1
+    LOG.info("contacts_processed", count=contacts_count)
 
-        # Get changed contributions
+    # Contributions
         contributions_count = 0
-        try:
-            for contribution_record in get_changed_entities_incremental(
-                configuration, session, "Contributions", last_sync_timestamp
+    for contribution in _run_export(
+        "Contributions", transform_csv_contribution_to_contribution
             ):
-                contribution = transform_csv_contribution_to_contribution(
-                    contribution_record
-                )
-                if contribution:  # Skip records with errors
                     yield op.upsert("contributions", contribution)
                     contributions_count += 1
-
-            log.info(f"Processed {contributions_count} changed contribution records")
-        except Exception as e:
-            log.warning(f"Failed to process contributions: {e}")
-            contributions_count = 0
+    LOG.info("contributions_processed", count=contributions_count)
 
         if contacts_count == 0 and contributions_count == 0:
-            log.warning(
-                "No data processed from incremental sync - this might indicate an issue"
-            )
+        LOG.warning("incremental_no_data")
 
-    except Exception as e:
-        log.warning(f"Incremental sync failed: {e}")
-        log.info("Consider falling back to initial sync or investigate the error")
-        raise
-
-    # Update last sync timestamp
     current_timestamp = datetime.utcnow().isoformat() + "Z"
     yield op.checkpoint(
         {"initial_sync_complete": True, "last_sync_timestamp": current_timestamp}
@@ -343,7 +480,7 @@ def transform_csv_contact_to_person(csv_row: dict) -> dict:
     """Transform CSV contact row to person schema format."""
     # Skip records with errors
     if csv_row.get("ErrorMessage"):
-        log.warning(f"Skipping contact with error: {csv_row.get('ErrorMessage')}")
+        LOG.warning("skip_contact_error", error=csv_row.get("ErrorMessage"))
         return None
 
     van_id = csv_row.get("VanID")
@@ -370,7 +507,7 @@ def transform_csv_contribution_to_contribution(csv_row: dict) -> dict:
     """Transform CSV contribution row to contribution schema format."""
     # Skip records with errors
     if csv_row.get("ErrorMessage"):
-        log.warning(f"Skipping contribution with error: {csv_row.get('ErrorMessage')}")
+        LOG.warning("skip_contribution_error", error=csv_row.get("ErrorMessage"))
         return None
 
     contribution_id = csv_row.get("ContributionID")
